@@ -9,3 +9,4 @@ flet
 faster-whisper
 sounddevice
 numpy
+websockets

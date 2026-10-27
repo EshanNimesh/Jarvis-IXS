@@ -1,6 +1,7 @@
 """Low-latency local speech-to-text with streaming voice activity detection."""
 
 import logging
+import threading
 import time
 
 import numpy as np
@@ -14,6 +15,34 @@ class STTService:
     """Stream microphone audio until trailing silence or the hard time limit."""
 
     sample_rate = 16_000
+
+    def wait_for_voice_activity(self, stop_event: threading.Event) -> bool:
+        """Monitor the microphone until speech is detected or monitoring is stopped."""
+        chunk_seconds = 0.1
+        chunk_frames = int(chunk_seconds * self.sample_rate)
+        with sd.InputStream(
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype="float32",
+            blocksize=chunk_frames,
+        ) as stream:
+            ambient_chunks = []
+            for _ in range(2):
+                if stop_event.is_set():
+                    return False
+                block, _overflowed = stream.read(chunk_frames)
+                ambient_chunks.append(np.asarray(block, dtype=np.float32).reshape(-1))
+            ambient = np.concatenate(ambient_chunks)
+            ambient_rms = float(np.sqrt(np.mean(np.square(ambient)))) if ambient.size else 0.0
+            threshold = max(0.005, ambient_rms * 1.8)
+            while not stop_event.is_set():
+                block, _overflowed = stream.read(chunk_frames)
+                samples = np.asarray(block, dtype=np.float32).reshape(-1)
+                rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+                if rms >= threshold:
+                    logger.info("Voice activity detected during TTS playback")
+                    return True
+        return False
 
     def __init__(self) -> None:
         self.model = WhisperModel("small.en", device="cpu", compute_type="int8")

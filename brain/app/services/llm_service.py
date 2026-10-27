@@ -108,5 +108,39 @@ class LLMService:
                     if line:
                         yield f"{line}\n"
 
+    async def query_llm_tokens(self, prompt: str) -> AsyncIterator[str]:
+        """Yield just the content delta from each upstream streaming event."""
+        if not settings.LLM_API_KEY:
+            raise RuntimeError("LLM API key is not configured.")
+
+        url = f"{settings.LLM_BASE_URL.rstrip('/')}/chat/completions"
+        headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"}
+        payload = {
+            "model": settings.LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": True,
+            "temperature": 0,
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data)
+                        token = event["choices"][0]["delta"].get("content")
+                    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                        logger.debug("Skipping malformed LLM token event")
+                        continue
+                    if isinstance(token, str) and token:
+                        yield token
+
 
 llm_service = LLMService()

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import threading
 
 from app.services.brain_client import BrainClient
 from app.services.executor import ActionExecutor
@@ -39,65 +40,77 @@ def take_completed_sentence(text: str, *, final: bool = False) -> tuple[str | No
     return None, text
 
 
-async def stream_response_to_tts(brain: BrainClient, tts: TTSService, prompt: str) -> dict[str, object]:
+async def stream_response_to_tts(
+    brain: BrainClient, tts: TTSService, stt: STTService, prompt: str
+) -> dict[str, object]:
     """Download, synthesize, and queue completed sentences concurrently."""
-    loop = asyncio.get_running_loop()
-    token_queue: asyncio.Queue[object] = asyncio.Queue()
     audio_queue: asyncio.Queue[object] = asyncio.Queue()
-    token_end, audio_end = object(), object()
-
-    def download() -> None:
-        try:
-            for chunk in brain.query_brain_stream(prompt):
-                asyncio.run_coroutine_threadsafe(token_queue.put(chunk), loop).result()
-        except Exception as exc:
-            asyncio.run_coroutine_threadsafe(token_queue.put(exc), loop).result()
-        finally:
-            asyncio.run_coroutine_threadsafe(token_queue.put(token_end), loop).result()
-
-    download_task = asyncio.create_task(asyncio.to_thread(download))
+    audio_end = object()
+    barge_in = asyncio.Event()
+    monitor_stop = threading.Event()
 
     async def play_audio_queue() -> None:
         started = False
+        monitor_task: asyncio.Task[None] | None = None
+
+        async def monitor_microphone() -> None:
+            try:
+                detected = await asyncio.to_thread(stt.wait_for_voice_activity, monitor_stop)
+            except Exception:
+                logger.exception("Barge-in microphone monitor failed")
+                return
+            if detected and not monitor_stop.is_set():
+                barge_in.set()
+                await asyncio.to_thread(tts.stop)
+
+        monitor_task = asyncio.create_task(monitor_microphone())
+
         while True:
             item = await audio_queue.get()
             if item is audio_end:
                 break
             task, sentence = item
+            if barge_in.is_set():
+                task.cancel()
+                continue
             try:
                 audio_data = await task
+                if barge_in.is_set():
+                    continue
                 await asyncio.to_thread(tts.play_prepared, audio_data)
                 started = True
             except Exception:
                 logger.exception("Sentence pre-synthesis failed")
+                if barge_in.is_set():
+                    continue
                 await asyncio.to_thread(tts.wait_until_done)
                 await tts.speak(sentence)
                 started = False
-        if started:
+        monitor_stop.set()
+        if monitor_task is not None:
+            await monitor_task
+        if started and not barge_in.is_set():
             await asyncio.to_thread(tts.wait_until_done)
 
     playback_task = asyncio.create_task(play_audio_queue())
     buffer = ""
     stream_error: Exception | None = None
-    while True:
-        item = await token_queue.get()
-        if item is token_end:
-            break
-        if isinstance(item, Exception):
-            stream_error = item
-            continue
-        chunk = str(item)
-        buffer += chunk
-        while True:
-            sentence, remainder = take_completed_sentence(buffer)
+    try:
+        async for chunk in brain.query_brain_stream(prompt):
+            buffer += chunk
+            while True:
+                sentence, remainder = take_completed_sentence(buffer)
             if sentence is None:
                 break
             buffer = remainder
+            if barge_in.is_set():
+                continue
             print(f"[TTS] Speaking response: {sentence}")
-            audio_task = asyncio.create_task(tts.synthesize(sentence))
-            await audio_queue.put((audio_task, sentence))
+                audio_task = asyncio.create_task(tts.synthesize(sentence))
+                await audio_queue.put((audio_task, sentence))
+    except Exception as exc:
+        stream_error = exc
 
-    await download_task
     while True:
         sentence, remainder = take_completed_sentence(buffer, final=True)
         if sentence is None:
@@ -151,7 +164,7 @@ async def run() -> None:
                 continue
             try:
                 try:
-                    streamed_result = await stream_response_to_tts(brain, tts, prompt)
+                    streamed_result = await stream_response_to_tts(brain, tts, stt, prompt)
                 except Exception:
                     logger.exception("Streaming query failed; retrying with regular query")
                     speak_text, action = await asyncio.to_thread(brain.query, prompt)
@@ -180,6 +193,7 @@ async def run() -> None:
                 print(f"JARVIS: {message}")
                 await tts.speak(message)
     finally:
+        await brain.close()
         await asyncio.to_thread(tts.close)
 
 
