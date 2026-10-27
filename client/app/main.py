@@ -11,6 +11,23 @@ from app.services.tts_service import TTSService
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+ABBREVIATIONS = {
+    "mr.", "mrs.", "dr.", "ms.", "vs.", "e.", "e.g.", "i.", "i.e.", "etc."
+}
+
+
+def take_completed_sentence(text: str) -> tuple[str | None, str]:
+    """Extract the first completed sentence without splitting known abbreviations."""
+    for match in re.finditer(r"[.!?]", text):
+        if match.group() == ".":
+            prefix = text[: match.end()]
+            token_match = re.search(r"([A-Za-z.]+)$", prefix)
+            if token_match and token_match.group(1).lower() in ABBREVIATIONS:
+                continue
+        sentence = text[: match.end()].strip()
+        if sentence:
+            return sentence, text[match.end() :]
+    return None, text
 
 
 async def stream_response_to_tts(brain: BrainClient, tts: TTSService, prompt: str) -> dict[str, object]:
@@ -42,12 +59,13 @@ async def stream_response_to_tts(brain: BrainClient, tts: TTSService, prompt: st
             raise item
         chunk = str(item)
         buffer += chunk
-        while match := re.search(r"[.!?]", buffer):
-            sentence = buffer[: match.end()].strip()
-            buffer = buffer[match.end() :]
-            if sentence:
-                print(f"[TTS] Speaking response: {sentence}")
-                await tts.speak(sentence)
+        while True:
+            sentence, remainder = take_completed_sentence(buffer)
+            if sentence is None:
+                break
+            buffer = remainder
+            print(f"[TTS] Speaking response: {sentence}")
+            await tts.speak(sentence)
 
     await download_task
     if buffer.strip():

@@ -25,6 +25,8 @@ class ActionExecutor:
 
     def execute(self, action: dict[str, Any]) -> dict[str, Any]:
         action_type = action.get("action", "none")
+        if action_type not in {"file_edit", "terminal_command", "none", "think"}:
+            return {"status": "ignored", "action": "none"}
         payload = action.get("payload", {})
         if not isinstance(payload, dict):
             return {"status": "error", "message": "Action payload must be an object."}
@@ -34,9 +36,8 @@ class ActionExecutor:
         if action_type == "terminal_command":
             return self._terminal_command(payload)
         if action_type in {"none", "think"}:
-            logger.info("Ignoring non-system action: %s", action_type)
             return {"status": "ignored", "action": action_type}
-        return {"status": "error", "message": f"Unsupported action: {action_type}"}
+        return {"status": "ignored", "action": "none"}
 
     def _file_edit(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not settings.allow_file_edits:

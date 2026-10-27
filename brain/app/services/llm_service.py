@@ -18,6 +18,7 @@ CRITICAL FOR VOICE LATENCY:
 - CRITICAL: Place the 'speak' key as the FIRST field in your JSON response so streaming begins immediately.
 - Keep the "speak" value extremely concise (1 to 2 short sentences, maximum 20 words).
 - Save detailed code, logs, or lengthy explanations for the "payload" or "thought" fields.
+- CRITICAL: The 'action' field MUST be strictly set to 'none' unless explicitly performing terminal or file edits. Never output invented actions like 'clarify' or 'answer_question'.
 """.strip()
 
 logger = logging.getLogger(__name__)
