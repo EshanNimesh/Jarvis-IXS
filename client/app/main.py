@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 
-from app.services.brain_client import BrainClient, _parse_structured_response
+from app.services.brain_client import BrainClient
 from app.services.executor import ActionExecutor
 from app.services.stt_service import STTService
 from app.services.tts_service import TTSService
@@ -33,7 +33,6 @@ async def stream_response_to_tts(brain: BrainClient, tts: TTSService, prompt: st
 
     download_task = asyncio.create_task(asyncio.to_thread(download))
     buffer = ""
-    full_response = ""
     while True:
         item = await queue.get()
         if item is sentinel:
@@ -42,9 +41,8 @@ async def stream_response_to_tts(brain: BrainClient, tts: TTSService, prompt: st
             await download_task
             raise item
         chunk = str(item)
-        full_response += chunk
         buffer += chunk
-        while match := re.search(r"[.!?\n]", buffer):
+        while match := re.search(r"[.!?]", buffer):
             sentence = buffer[: match.end()].strip()
             buffer = buffer[match.end() :]
             if sentence:
@@ -55,7 +53,7 @@ async def stream_response_to_tts(brain: BrainClient, tts: TTSService, prompt: st
     if buffer.strip():
         print(f"[TTS] Speaking response: {buffer.strip()}")
         await tts.speak(buffer.strip())
-    return _parse_structured_response(full_response)
+    return brain.last_stream_result
 
 
 async def run() -> None:
