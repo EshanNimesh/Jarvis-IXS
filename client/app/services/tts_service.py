@@ -1,13 +1,13 @@
-"""Low-latency local speech using pyttsx3."""
+"""Local speech synthesis with Edge TTS and pygame playback."""
 
 import asyncio
 import atexit
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 import logging
-import tempfile
 import threading
 import time
-from pathlib import Path
+from typing import Any
 
 from app.config import settings
 
@@ -15,25 +15,76 @@ logger = logging.getLogger(__name__)
 
 
 class TTSService:
-    """Speak text locally without blocking the async client loop."""
+    """Synthesize sentences asynchronously and play queued audio in order."""
 
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-tts")
-        self._playback_lock = threading.Lock()
-        self._edge_lock = asyncio.Lock()
+        self._playback_lock = threading.RLock()
         self._mixer_ready = False
-        self._audio_path: Path | None = None
+        self._channel: Any = None
+        self._sounds: list[Any] = []
         try:
             import pygame
 
             pygame.mixer.init()
+            self._channel = pygame.mixer.find_channel(True)
             self._mixer_ready = True
         except Exception:
             logger.exception("Could not initialize pygame audio mixer")
-        temp_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        temp_file.close()
-        self._audio_path = Path(temp_file.name)
-        atexit.register(self._cleanup_audio_file)
+        atexit.register(self.close)
+
+    async def synthesize(self, text: str) -> bytes:
+        """Fetch sentence audio bytes without waiting for current playback."""
+        if not self._mixer_ready:
+            raise RuntimeError("pygame audio mixer is unavailable")
+        import edge_tts
+
+        voice = settings.tts_voice or "en-US-GuyNeural"
+        audio = bytearray()
+        async for chunk in edge_tts.Communicate(text, voice=voice).stream():
+            if chunk.get("type") == "audio":
+                audio.extend(chunk["data"])
+        if not audio:
+            raise RuntimeError("Edge TTS returned an empty audio response")
+        return bytes(audio)
+
+    def play_prepared(self, audio_data: bytes) -> None:
+        """Start playback, or queue the clip behind the current sentence."""
+        import pygame
+
+        sound = pygame.mixer.Sound(file=BytesIO(audio_data))
+        with self._playback_lock:
+            if self._channel is None:
+                self._channel = pygame.mixer.find_channel(True)
+            if self._channel.get_busy():
+                self._wait_for_queue_slot()
+                self._channel.queue(sound)
+            else:
+                self._channel.play(sound)
+            self._sounds.append(sound)
+
+    def _wait_for_queue_slot(self) -> None:
+        while self._channel.get_busy() and self._channel.get_queue() is not None:
+            time.sleep(0.01)
+
+    def wait_until_done(self) -> None:
+        with self._playback_lock:
+            while self._channel is not None and self._channel.get_busy():
+                time.sleep(0.02)
+            self._sounds.clear()
+
+    async def speak(self, text: str) -> None:
+        """Synthesize and play one sentence, falling back to local pyttsx3."""
+        if not text.strip():
+            return
+        try:
+            audio_data = await self.synthesize(text)
+            await asyncio.to_thread(self.play_prepared, audio_data)
+            await asyncio.to_thread(self.wait_until_done)
+        except Exception:
+            logger.exception("Edge TTS failed; falling back to local pyttsx3")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(self._executor, self._speak_sync, text)
 
     def _speak_sync(self, text: str) -> None:
         com_initialized = False
@@ -45,10 +96,7 @@ class TTSService:
                 pythoncom.CoInitialize()
                 com_initialized = True
             except ImportError:
-                # pythoncom is only available on Windows; other pyttsx3 drivers
-                # do not require explicit COM setup.
                 pass
-
             import pyttsx3
 
             engine = pyttsx3.init()
@@ -57,63 +105,28 @@ class TTSService:
                 engine.setProperty("voice", settings.tts_voice)
             engine.say(text)
             engine.runAndWait()
-        except Exception:
-            logger.exception("Local text-to-speech failed")
-            raise
         finally:
             if engine is not None:
-                try:
-                    engine.stop()
-                except Exception:
-                    logger.debug("TTS engine shutdown failed", exc_info=True)
+                engine.stop()
             if com_initialized:
                 import pythoncom
 
                 pythoncom.CoUninitialize()
 
-    async def speak(self, text: str) -> None:
-        if not text.strip():
-            return
-        try:
-            await self._speak_edge(text)
-        except Exception:
-            logger.exception("Edge TTS failed; falling back to local pyttsx3")
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(self._executor, self._speak_sync, text)
-
     def stop(self) -> None:
-        """Stop currently playing Edge TTS audio, if any."""
+        """Stop pygame playback immediately."""
         try:
             import pygame
 
             if pygame.mixer.get_init():
                 pygame.mixer.music.stop()
+                if self._channel is not None:
+                    self._channel.stop()
+                with self._playback_lock:
+                    self._sounds.clear()
         except Exception:
             logger.exception("Could not stop TTS playback")
 
-    async def _speak_edge(self, text: str) -> None:
-        import edge_tts
-
-        if not self._mixer_ready or self._audio_path is None:
-            raise RuntimeError("pygame audio mixer is unavailable")
-        voice = settings.tts_voice or "en-US-GuyNeural"
-        async with self._edge_lock:
-            await edge_tts.Communicate(text, voice=voice).save(str(self._audio_path))
-            await asyncio.to_thread(self._play_mp3_sync, self._audio_path)
-
-    def _play_mp3_sync(self, audio_path: Path) -> None:
-        import pygame
-
-        with self._playback_lock:
-            pygame.mixer.music.load(str(audio_path))
-            pygame.mixer.music.play()
-            while pygame.mixer.music.get_busy():
-                time.sleep(0.03)
-            pygame.mixer.music.unload()
-
-    def _cleanup_audio_file(self) -> None:
-        if self._audio_path is not None:
-            try:
-                self._audio_path.unlink(missing_ok=True)
-            except OSError:
-                logger.debug("Could not remove temporary TTS audio file", exc_info=True)
+    def close(self) -> None:
+        self.stop()
+        self._executor.shutdown(wait=False, cancel_futures=True)

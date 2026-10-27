@@ -1,7 +1,5 @@
 """Agent query endpoints."""
 
-import json
-
 from fastapi import APIRouter
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
@@ -27,18 +25,11 @@ def query_agent(payload: QueryRequest) -> dict[str, object]:
     }
 
 
-async def _stream_query(prompt: str):
-    try:
-        async for text_chunk in llm_service.query_llm_stream(prompt):
-            yield json.dumps({"text": text_chunk}, ensure_ascii=False) + "\n"
-    except Exception as exc:
-        yield json.dumps({"error": str(exc)}, ensure_ascii=False) + "\n"
-
-
 @router.post("/query_stream")
 async def query_agent_stream(payload: QueryRequest) -> StreamingResponse:
-    """Stream provider-generated content as newline-delimited JSON events."""
+    """Stream provider SSE events directly to the client."""
     return StreamingResponse(
-        _stream_query(payload.prompt),
-        media_type="application/x-ndjson",
+        llm_service.query_llm_stream(payload.prompt),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )

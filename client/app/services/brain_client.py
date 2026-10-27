@@ -81,7 +81,7 @@ class BrainClient:
                     line = line[5:].strip()
                 if line == "[DONE]":
                     break
-                # The Brain emits NDJSON; also accept OpenAI-compatible SSE events.
+                # Read each provider SSE event as it arrives and extract its token.
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:

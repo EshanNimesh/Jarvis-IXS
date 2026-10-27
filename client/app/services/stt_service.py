@@ -18,14 +18,14 @@ class STTService:
     def __init__(self) -> None:
         self.model = WhisperModel("small.en", device="cpu", compute_type="int8")
 
-    def listen_and_transcribe(self, duration_seconds: int = 8) -> str:
+    def listen_and_transcribe(self, duration_seconds: int = 15) -> str:
         if duration_seconds <= 0:
             raise ValueError("duration_seconds must be greater than zero")
 
-        max_seconds = min(duration_seconds, 8)
+        max_seconds = min(float(duration_seconds), 15.0)
         chunk_seconds = 0.1
         chunk_frames = int(chunk_seconds * self.sample_rate)
-        silence_chunks_required = round(1.3 / chunk_seconds)
+        silence_chunks_required = round(1.4 / chunk_seconds)
         ambient_chunks: list[np.ndarray] = []
         speech_chunks: list[np.ndarray] = []
         speech_started = False

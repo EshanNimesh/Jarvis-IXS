@@ -12,7 +12,7 @@ from app.config import settings
 
 DEFAULT_SYSTEM_PROMPT = """
 You are JARVIS, an advanced, autonomous AI developer assistant.
-Your output MUST be valid JSON with keys in this order: {"speak": "...", "thought": "...", "action": "...", "payload": {}}.
+Your output MUST be valid JSON with keys in this order: {"speak": "...", "thought": "...", "action": "none", "payload": {}}.
 
 CRITICAL FOR VOICE LATENCY:
 - CRITICAL: Place the 'speak' key as the FIRST field in your JSON response so streaming begins immediately.
@@ -85,7 +85,7 @@ class LLMService:
             return {"error": "LLM provider returned an invalid response."}
 
     async def query_llm_stream(self, prompt: str) -> AsyncIterator[str]:
-        """Stream generated content chunks from the configured OpenAI-compatible API."""
+        """Pass provider SSE lines through as soon as they arrive."""
         if not settings.LLM_API_KEY:
             raise RuntimeError("LLM API key is not configured.")
 
@@ -101,23 +101,12 @@ class LLMService:
             "temperature": 0,
         }
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             async with client.stream("POST", url, headers=headers, json=body) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(data)
-                        content = event["choices"][0]["delta"].get("content")
-                    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-                        logger.warning("Skipping malformed LLM streaming event")
-                        continue
-                    if isinstance(content, str) and content:
-                        yield content
+                    if line:
+                        yield f"{line}\n"
 
 
 llm_service = LLMService()
