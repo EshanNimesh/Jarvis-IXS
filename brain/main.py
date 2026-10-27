@@ -1,11 +1,5 @@
-from fastapi import FastAPI
+"""Compatibility entry point for ``uvicorn main:app`` from ``brain/``."""
 
-app = FastAPI(title="JARVIS Central Brain")
+from app.main import app
 
-@app.get("/")
-def read_root():
-    return {"status": "online", "core": "JARVIS Brain Server v1.0"}
-
-@app.get("/health")
-def health_check():
-    return {"health": "ok"}
+__all__ = ["app"]
