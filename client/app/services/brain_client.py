@@ -82,10 +82,12 @@ class BrainClient:
                 if line == "[DONE]":
                     break
                 # Read each provider SSE event as it arrives and extract its token.
+                token = line
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
-                    continue
+                    # A partial content fragment may not be valid JSON yet.
+                    event = None
                 if isinstance(event, dict):
                     if "error" in event:
                         raise RuntimeError(f"Brain streaming error: {event['error']}")
@@ -97,49 +99,52 @@ class BrainClient:
                     )
                     if token is None:
                         token = event.get("text", event.get("token", ""))
-                    if isinstance(token, str) and token:
-                        raw_response += token
-                        if not speak_started:
-                            match = re.search(r'(?<!\\)"speak"\s*:\s*"', raw_response)
-                            if match:
-                                speak_started = True
-                                scan_position = match.end()
-                        if not speak_started or speak_finished:
-                            continue
+                elif isinstance(event, str):
+                    token = event
 
-                        decoded: list[str] = []
-                        while scan_position < len(raw_response):
-                            char = raw_response[scan_position]
-                            scan_position += 1
-                            if unicode_mode:
-                                unicode_digits += char
-                                if len(unicode_digits) == 4:
-                                    try:
-                                        decoded.append(chr(int(unicode_digits, 16)))
-                                    except ValueError:
-                                        decoded.append("�")
-                                    unicode_mode = False
-                                    unicode_digits = ""
-                                continue
-                            if escaped:
-                                escaped = False
-                                if char == "u":
-                                    unicode_mode = True
-                                    unicode_digits = ""
-                                else:
-                                    decoded.append({
-                                        '"': '"', "\\": "\\", "/": "/",
-                                        "n": "\n", "r": "\r", "t": "\t",
-                                        "b": "\b", "f": "\f",
-                                    }.get(char, char))
-                                continue
-                            if char == "\\":
-                                escaped = True
-                            elif char == '"':
-                                speak_finished = True
-                                break
+                if isinstance(token, str) and token:
+                    raw_response += token
+                    if not speak_started:
+                        match = re.search(r'(?<!\\)"speak"\s*:\s*"', raw_response)
+                        if match:
+                            speak_started = True
+                            scan_position = match.end()
+                    if not speak_started or speak_finished:
+                        continue
+
+                    decoded: list[str] = []
+                    while scan_position < len(raw_response):
+                        char = raw_response[scan_position]
+                        scan_position += 1
+                        if unicode_mode:
+                            unicode_digits += char
+                            if len(unicode_digits) == 4:
+                                try:
+                                    decoded.append(chr(int(unicode_digits, 16)))
+                                except ValueError:
+                                    decoded.append("�")
+                                unicode_mode = False
+                                unicode_digits = ""
+                            continue
+                        if escaped:
+                            escaped = False
+                            if char == "u":
+                                unicode_mode = True
+                                unicode_digits = ""
                             else:
-                                decoded.append(char)
-                        if decoded:
-                            yield "".join(decoded)
+                                decoded.append({
+                                    '"': '"', "\\": "\\", "/": "/",
+                                    "n": "\n", "r": "\r", "t": "\t",
+                                    "b": "\b", "f": "\f",
+                                }.get(char, char))
+                            continue
+                        if char == "\\":
+                            escaped = True
+                        elif char == '"':
+                            speak_finished = True
+                            break
+                        else:
+                            decoded.append(char)
+                    if decoded:
+                        yield "".join(decoded)
         self.last_stream_result = _parse_structured_response(raw_response)

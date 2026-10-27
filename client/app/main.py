@@ -16,9 +16,16 @@ ABBREVIATIONS = {
 }
 
 
-def take_completed_sentence(text: str) -> tuple[str | None, str]:
+def take_completed_sentence(text: str, *, final: bool = False) -> tuple[str | None, str]:
     """Extract the first completed sentence without splitting known abbreviations."""
     for match in re.finditer(r"[.!?\n]", text):
+        punctuation = match.group()
+        if punctuation != "\n":
+            if match.end() == len(text):
+                if not final:
+                    continue
+            elif not text[match.end()].isspace():
+                continue
         if match.group() == ".":
             prefix = text[: match.end()]
             token_match = re.search(r"([A-Za-z.]+)$", prefix)
@@ -91,10 +98,19 @@ async def stream_response_to_tts(brain: BrainClient, tts: TTSService, prompt: st
             await audio_queue.put((audio_task, sentence))
 
     await download_task
+    while True:
+        sentence, remainder = take_completed_sentence(buffer, final=True)
+        if sentence is None:
+            break
+        buffer = remainder
+        print(f"[TTS] Speaking response: {sentence}")
+        audio_task = asyncio.create_task(tts.synthesize(sentence))
+        await audio_queue.put((audio_task, sentence))
     if buffer.strip():
-        print(f"[TTS] Speaking response: {buffer.strip()}")
-        audio_task = asyncio.create_task(tts.synthesize(buffer.strip()))
-        await audio_queue.put((audio_task, buffer.strip()))
+        tail = buffer.strip()
+        print(f"[TTS] Speaking response: {tail}")
+        audio_task = asyncio.create_task(tts.synthesize(tail))
+        await audio_queue.put((audio_task, tail))
     await audio_queue.put(audio_end)
     await playback_task
     if stream_error is not None:
