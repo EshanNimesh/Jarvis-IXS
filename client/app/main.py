@@ -69,6 +69,7 @@ async def run() -> None:
             print("Goodbye!")
             break
         if prompt.lower() == "/voice" or not prompt:
+            await asyncio.to_thread(tts.stop)
             print("[STT] Listening to microphone...")
             try:
                 prompt = await asyncio.to_thread(stt.listen_and_transcribe)

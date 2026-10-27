@@ -81,6 +81,16 @@ class TTSService:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(self._executor, self._speak_sync, text)
 
+    def stop(self) -> None:
+        """Stop currently playing Edge TTS audio, if any."""
+        try:
+            import pygame
+
+            if pygame.mixer.get_init():
+                pygame.mixer.music.stop()
+        except Exception:
+            logger.exception("Could not stop TTS playback")
+
     async def _speak_edge(self, text: str) -> None:
         import edge_tts
 

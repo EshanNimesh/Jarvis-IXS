@@ -25,7 +25,7 @@ class STTService:
         max_seconds = min(duration_seconds, 8)
         chunk_seconds = 0.1
         chunk_frames = int(chunk_seconds * self.sample_rate)
-        silence_chunks_required = int(0.8 / chunk_seconds)
+        silence_chunks_required = round(1.3 / chunk_seconds)
         ambient_chunks: list[np.ndarray] = []
         speech_chunks: list[np.ndarray] = []
         speech_started = False
