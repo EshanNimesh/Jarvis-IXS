@@ -54,7 +54,7 @@ class STTService:
         max_seconds = min(float(duration_seconds), 15.0)
         chunk_seconds = 0.1
         chunk_frames = int(chunk_seconds * self.sample_rate)
-        silence_chunks_required = round(1.4 / chunk_seconds)
+        silence_chunks_required = round(0.8 / chunk_seconds)
         ambient_chunks: list[np.ndarray] = []
         speech_chunks: list[np.ndarray] = []
         speech_started = False
@@ -103,5 +103,10 @@ class STTService:
             beam_size=1,
             best_of=1,
             temperature=0,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            condition_on_previous_text=False,
+            no_speech_threshold=0.6,
+            initial_prompt="JARVIS AI voice assistant conversation.",
         )
         return " ".join(segment.text.strip() for segment in segments).strip()

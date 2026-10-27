@@ -7,8 +7,6 @@ from io import BytesIO
 import logging
 import threading
 import time
-from typing import Any
-
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -20,14 +18,14 @@ class TTSService:
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-tts")
         self._playback_lock = threading.RLock()
+        self._state_lock = threading.Lock()
+        self._playback_generation = 0
         self._mixer_ready = False
-        self._channel: Any = None
-        self._sounds: list[Any] = []
+        self._current_audio_file: BytesIO | None = None
         try:
             import pygame
 
             pygame.mixer.init()
-            self._channel = pygame.mixer.find_channel(True)
             self._mixer_ready = True
         except Exception:
             logger.exception("Could not initialize pygame audio mixer")
@@ -49,29 +47,39 @@ class TTSService:
         return bytes(audio)
 
     def play_prepared(self, audio_data: bytes) -> None:
-        """Start playback, or queue the clip behind the current sentence."""
+        """Play an in-memory MP3 after the current sentence finishes."""
         import pygame
 
-        sound = pygame.mixer.Sound(file=BytesIO(audio_data))
+        with self._state_lock:
+            generation = self._playback_generation
         with self._playback_lock:
-            if self._channel is None:
-                self._channel = pygame.mixer.find_channel(True)
-            if self._channel.get_busy():
-                self._wait_for_queue_slot()
-                self._channel.queue(sound)
-            else:
-                self._channel.play(sound)
-            self._sounds.append(sound)
+            while pygame.mixer.music.get_busy():
+                with self._state_lock:
+                    if generation != self._playback_generation:
+                        return
+                time.sleep(0.01)
+            with self._state_lock:
+                if generation != self._playback_generation:
+                    return
+                audio_file = BytesIO(audio_data)
+                pygame.mixer.music.load(audio_file, "mp3")
+                self._current_audio_file = audio_file
+                pygame.mixer.music.play()
 
-    def _wait_for_queue_slot(self) -> None:
-        while self._channel.get_busy() and self._channel.get_queue() is not None:
-            time.sleep(0.01)
+    def is_playing(self) -> bool:
+        """Return whether JARVIS audio is currently playing through pygame."""
+        try:
+            import pygame
+
+            return bool(pygame.mixer.get_init() and pygame.mixer.music.get_busy())
+        except Exception:
+            return False
 
     def wait_until_done(self) -> None:
         with self._playback_lock:
-            while self._channel is not None and self._channel.get_busy():
+            while self.is_playing():
                 time.sleep(0.02)
-            self._sounds.clear()
+            self._current_audio_file = None
 
     async def speak(self, text: str) -> None:
         """Synthesize and play one sentence, falling back to local pyttsx3."""
@@ -115,15 +123,15 @@ class TTSService:
 
     def stop(self) -> None:
         """Stop pygame playback immediately."""
+        with self._state_lock:
+            self._playback_generation += 1
         try:
             import pygame
 
             if pygame.mixer.get_init():
                 pygame.mixer.music.stop()
-                if self._channel is not None:
-                    self._channel.stop()
-                with self._playback_lock:
-                    self._sounds.clear()
+            with self._playback_lock:
+                self._current_audio_file = None
         except Exception:
             logger.exception("Could not stop TTS playback")
 

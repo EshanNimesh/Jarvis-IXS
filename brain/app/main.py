@@ -2,13 +2,25 @@
 
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import agent, health
 
-app = FastAPI(title="JARVIS Central Brain")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    await agent.llm_service.start()
+    try:
+        yield
+    finally:
+        await agent.llm_service.close()
+
+
+app = FastAPI(title="JARVIS Central Brain", lifespan=lifespan)
 logger = logging.getLogger(__name__)
 
 app.add_middleware(

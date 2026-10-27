@@ -18,26 +18,35 @@ ABBREVIATIONS = {
 
 
 def take_completed_sentence(text: str, *, final: bool = False) -> tuple[str | None, str]:
-    """Extract the first completed sentence without splitting known abbreviations."""
+    """Extract a sentence as soon as its punctuation arrives, preserving abbreviations."""
+    boundary: int | None = None
     for match in re.finditer(r"[.!?\n]", text):
         punctuation = match.group()
-        if punctuation != "\n":
-            if match.end() == len(text):
-                if not final:
-                    continue
-            elif not text[match.end()].isspace():
+        if punctuation == ".":
+            previous_is_digit = match.start() > 0 and text[match.start() - 1].isdigit()
+            next_is_digit = match.end() < len(text) and text[match.end()].isdigit()
+            if previous_is_digit and next_is_digit:
                 continue
-        if match.group() == ".":
             prefix = text[: match.end()]
             token_match = re.search(r"([A-Za-z.]+)$", prefix)
             if token_match and token_match.group(1).lower() in ABBREVIATIONS:
                 continue
-        sentence = text[: match.end()].strip()
-        if sentence:
-            remainder = text[match.end() :].lstrip()
-            remainder = re.sub(r'^["\'”’»]+\s*', "", remainder)
-            return sentence, remainder
-    return None, text
+        boundary = match.end()
+        break
+
+    word_matches = list(re.finditer(r"\S+", text))
+    if len(word_matches) >= 12:
+        twelfth_word_end = word_matches[11].end()
+        has_boundary = twelfth_word_end < len(text) or final
+        if has_boundary and (boundary is None or twelfth_word_end < boundary):
+            boundary = twelfth_word_end
+
+    if boundary is None:
+        return None, text
+    sentence = text[:boundary].strip()
+    remainder = text[boundary:].lstrip()
+    remainder = re.sub(r'^["\'”’»]+\s*', "", remainder)
+    return (sentence, remainder) if sentence else (None, text)
 
 
 async def stream_response_to_tts(
@@ -54,14 +63,25 @@ async def stream_response_to_tts(
         monitor_task: asyncio.Task[None] | None = None
 
         async def monitor_microphone() -> None:
-            try:
-                detected = await asyncio.to_thread(stt.wait_for_voice_activity, monitor_stop)
-            except Exception:
-                logger.exception("Barge-in microphone monitor failed")
-                return
-            if detected and not monitor_stop.is_set():
-                barge_in.set()
-                await asyncio.to_thread(tts.stop)
+            while not monitor_stop.is_set():
+                try:
+                    # The microphone monitor is idle during token generation and
+                    # only treats voice as a barge-in while JARVIS audio is active.
+                    if not await asyncio.to_thread(tts.is_playing):
+                        await asyncio.sleep(0.05)
+                        continue
+                    detected = await asyncio.to_thread(stt.wait_for_voice_activity, monitor_stop)
+                    if (
+                        detected
+                        and not monitor_stop.is_set()
+                        and await asyncio.to_thread(tts.is_playing)
+                    ):
+                        barge_in.set()
+                        await asyncio.to_thread(tts.stop)
+                        return
+                except Exception:
+                    logger.exception("Barge-in microphone monitor failed")
+                    return
 
         monitor_task = asyncio.create_task(monitor_microphone())
 
@@ -100,12 +120,12 @@ async def stream_response_to_tts(
             buffer += chunk
             while True:
                 sentence, remainder = take_completed_sentence(buffer)
-            if sentence is None:
-                break
-            buffer = remainder
-            if barge_in.is_set():
-                continue
-            print(f"[TTS] Speaking response: {sentence}")
+                if sentence is None:
+                    break
+                buffer = remainder
+                if barge_in.is_set():
+                    continue
+                print(f"[TTS] Speaking response: {sentence}")
                 audio_task = asyncio.create_task(tts.synthesize(sentence))
                 await audio_queue.put((audio_task, sentence))
     except Exception as exc:

@@ -1,5 +1,6 @@
 """Client for OpenAI-compatible chat completion APIs."""
 
+import asyncio
 import json
 import logging
 import re
@@ -33,6 +34,31 @@ def _strip_markdown_fence(text: str) -> str:
 
 class LLMService:
     """Generate assistant responses using the configured LLM provider."""
+
+    def __init__(self) -> None:
+        self._async_client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+
+    async def start(self) -> None:
+        """Create the shared async HTTP client during application startup."""
+        async with self._client_lock:
+            if self._async_client is None or self._async_client.is_closed:
+                self._async_client = httpx.AsyncClient(timeout=30.0)
+
+    async def close(self) -> None:
+        """Close the shared client during application shutdown."""
+        async with self._client_lock:
+            client = self._async_client
+            self._async_client = None
+        if client is not None and not client.is_closed:
+            await client.aclose()
+
+    async def _get_async_client(self) -> httpx.AsyncClient:
+        """Return the shared client, initializing it for non-lifespan use too."""
+        async with self._client_lock:
+            if self._async_client is None or self._async_client.is_closed:
+                self._async_client = httpx.AsyncClient(timeout=30.0)
+            return self._async_client
 
     def generate_response(self, prompt: str, system_prompt: str = "") -> dict[str, object]:
         """Return assistant content, or a structured error when unavailable."""
@@ -101,12 +127,12 @@ class LLMService:
             "temperature": 0,
         }
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if line:
-                        yield f"{line}\n"
+        client = await self._get_async_client()
+        async with client.stream("POST", url, headers=headers, json=body) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line:
+                    yield f"{line}\n"
 
     async def query_llm_tokens(self, prompt: str) -> AsyncIterator[str]:
         """Yield just the content delta from each upstream streaming event."""
@@ -124,23 +150,23 @@ class LLMService:
             "stream": True,
             "temperature": 0,
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(data)
-                        token = event["choices"][0]["delta"].get("content")
-                    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-                        logger.debug("Skipping malformed LLM token event")
-                        continue
-                    if isinstance(token, str) and token:
-                        yield token
+        client = await self._get_async_client()
+        async with client.stream("POST", url, json=payload, headers=headers) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                    token = event["choices"][0]["delta"].get("content")
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    logger.debug("Skipping malformed LLM token event")
+                    continue
+                if isinstance(token, str) and token:
+                    yield token
 
 
 llm_service = LLMService()
