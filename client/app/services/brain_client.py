@@ -54,3 +54,43 @@ class BrainClient:
         if not isinstance(action["payload"], dict):
             action["payload"] = {}
         return speak_text, action
+
+    def query_brain_stream(self, prompt: str):
+        """Yield text chunks from the Brain's streaming query endpoint."""
+        with requests.post(
+            f"{settings.brain_url.rstrip('/')}/api/v1/query_stream",
+            json={"prompt": prompt, "context": {}},
+            timeout=(10, self.timeout),
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            response.encoding = response.encoding or "utf-8"
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                line = raw_line.strip()
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                # Accept SSE token objects as well as plain text stream chunks.
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    yield line
+                    continue
+                if isinstance(event, str):
+                    yield event
+                elif isinstance(event, dict):
+                    if "error" in event:
+                        raise RuntimeError(f"Brain streaming error: {event['error']}")
+                    choices = event.get("choices") or []
+                    token = (
+                        choices[0].get("delta", {}).get("content")
+                        if choices and isinstance(choices[0], dict)
+                        else None
+                    )
+                    if token is None:
+                        token = event.get("text", event.get("token", ""))
+                    if isinstance(token, str) and token:
+                        yield token

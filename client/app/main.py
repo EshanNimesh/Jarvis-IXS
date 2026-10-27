@@ -2,14 +2,60 @@
 
 import asyncio
 import logging
+import re
 
-from app.services.brain_client import BrainClient
+from app.services.brain_client import BrainClient, _parse_structured_response
 from app.services.executor import ActionExecutor
 from app.services.stt_service import STTService
 from app.services.tts_service import TTSService
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+async def stream_response_to_tts(brain: BrainClient, tts: TTSService, prompt: str) -> dict[str, object]:
+    """Download Brain chunks in the background and speak completed sentences."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    sentinel = object()
+
+    def enqueue(item: object) -> None:
+        asyncio.run_coroutine_threadsafe(queue.put(item), loop).result()
+
+    def download() -> None:
+        try:
+            for chunk in brain.query_brain_stream(prompt):
+                enqueue(chunk)
+        except Exception as exc:
+            enqueue(exc)
+        finally:
+            enqueue(sentinel)
+
+    download_task = asyncio.create_task(asyncio.to_thread(download))
+    buffer = ""
+    full_response = ""
+    while True:
+        item = await queue.get()
+        if item is sentinel:
+            break
+        if isinstance(item, Exception):
+            await download_task
+            raise item
+        chunk = str(item)
+        full_response += chunk
+        buffer += chunk
+        while match := re.search(r"[.!?\n]", buffer):
+            sentence = buffer[: match.end()].strip()
+            buffer = buffer[match.end() :]
+            if sentence:
+                print(f"[TTS] Speaking response: {sentence}")
+                await tts.speak(sentence)
+
+    await download_task
+    if buffer.strip():
+        print(f"[TTS] Speaking response: {buffer.strip()}")
+        await tts.speak(buffer.strip())
+    return _parse_structured_response(full_response)
 
 
 async def run() -> None:
@@ -41,11 +87,28 @@ async def run() -> None:
         if not prompt:
             continue
         try:
-            speak_text, action = await asyncio.to_thread(brain.query, prompt)
+            try:
+                streamed_result = await stream_response_to_tts(brain, tts, prompt)
+            except Exception:
+                logger.exception("Streaming query failed; retrying with regular query")
+                speak_text, action = await asyncio.to_thread(brain.query, prompt)
+                streamed_result = {
+                    "speak": speak_text,
+                    "action": action.get("action", "none"),
+                    "payload": action.get("payload", {}),
+                }
+                print(f"[TTS] Speaking response: {speak_text}")
+                await tts.speak(speak_text)
             print("[BRAIN] Received response")
-            print(f"JARVIS: {speak_text}")
-            print("[TTS] Speaking response...")
-            await tts.speak(speak_text)
+            speak_text = streamed_result.get("speak", "")
+            if isinstance(speak_text, str):
+                print(f"JARVIS: {speak_text}")
+            action = {
+                "action": streamed_result.get("action", "none"),
+                "payload": streamed_result.get("payload", {}),
+            }
+            if not isinstance(action["payload"], dict):
+                action["payload"] = {}
             result = await asyncio.to_thread(executor.execute, action)
             logger.info("Action result: %s", result)
         except Exception as exc:

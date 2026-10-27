@@ -16,7 +16,13 @@ class STTService:
     sample_rate = 16_000
 
     def __init__(self) -> None:
-        self.model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+        try:
+            self.model = WhisperModel(
+                "distil-whisper/distil-small.en", device="cpu", compute_type="int8"
+            )
+        except Exception:
+            logger.exception("Could not load distil-small.en; falling back to small.en")
+            self.model = WhisperModel("small.en", device="cpu", compute_type="int8")
 
     def listen_and_transcribe(self, duration_seconds: int = 8) -> str:
         if duration_seconds <= 0:
