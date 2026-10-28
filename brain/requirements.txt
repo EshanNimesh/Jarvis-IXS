@@ -6,3 +6,4 @@ python-dotenv
 requests
 httpx
 websockets
+modal

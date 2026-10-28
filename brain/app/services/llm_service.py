@@ -26,6 +26,7 @@ CRITICAL FOR VOICE LATENCY:
 """.strip()
 
 logger = logging.getLogger(__name__)
+MODAL_GLIMMER_URL = "https://eshannimesh777--jarvis-glimmer-generate-sse.us-east.modal.run"
 
 
 def _strip_markdown_fence(text: str) -> str:
@@ -113,53 +114,47 @@ class LLMService:
             logger.exception("LLM provider returned an invalid response")
             return {"error": "LLM provider returned an invalid response."}
 
-    async def query_llm_stream(self, prompt: str) -> AsyncIterator[str]:
-        """Pass provider SSE lines through as soon as they arrive."""
-        if not settings.LLM_API_KEY:
-            raise RuntimeError("LLM API key is not configured.")
-
-        url = f"{settings.LLM_BASE_URL.rstrip('/')}/chat/completions"
-        headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"}
+    async def query_llm_stream(
+        self, prompt: str, system_prompt: str = ""
+    ) -> AsyncIterator[str]:
+        """Pass Modal's SSE events through as soon as they arrive."""
         body = {
-            "model": settings.LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": True,
-            "temperature": 0,
+            "prompt": prompt,
+            "system": system_prompt or DEFAULT_SYSTEM_PROMPT,
         }
 
         client = await self._get_async_client()
-        async with client.stream("POST", url, headers=headers, json=body) as response:
+        async with client.stream(
+            "POST",
+            MODAL_GLIMMER_URL,
+            headers={"Accept": "text/event-stream"},
+            json=body,
+        ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if line:
                     yield f"{line}\n"
 
-    async def query_llm_tokens(self, prompt: str) -> AsyncIterator[str]:
+    async def query_llm_tokens(
+        self, prompt: str, system_prompt: str = ""
+    ) -> AsyncIterator[str]:
         """Yield just the content delta from each upstream streaming event."""
-        if not settings.LLM_API_KEY:
-            raise RuntimeError("LLM API key is not configured.")
-
         stream_started = time.perf_counter()
         first_token_seen = False
         token_count = 0
 
-        url = f"{settings.LLM_BASE_URL.rstrip('/')}/chat/completions"
-        headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"}
         payload = {
-            "model": settings.LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": True,
-            "temperature": 0,
+            "prompt": prompt,
+            "system": system_prompt or DEFAULT_SYSTEM_PROMPT,
         }
         client = await self._get_async_client()
         try:
-            async with client.stream("POST", url, json=payload, headers=headers) as response:
+            async with client.stream(
+                "POST",
+                MODAL_GLIMMER_URL,
+                json=payload,
+                headers={"Accept": "text/event-stream"},
+            ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line or not line.startswith("data:"):
@@ -169,7 +164,12 @@ class LLMService:
                         break
                     try:
                         event = json.loads(data)
-                        token = event["choices"][0]["delta"].get("content")
+                        if isinstance(event, str):
+                            # Modal emits each token as a JSON-encoded SSE string.
+                            token = event
+                        else:
+                            # Retain support for OpenAI-compatible SSE providers.
+                            token = event["choices"][0]["delta"].get("content")
                     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
                         logger.debug("Skipping malformed LLM token event")
                         continue
