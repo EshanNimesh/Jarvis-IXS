@@ -3,10 +3,10 @@ pydantic
 pydantic-settings
 python-dotenv
 pyttsx3
-edge-tts
 pygame
 flet
 faster-whisper
 sounddevice
 numpy
 websockets
+kokoro-onnx

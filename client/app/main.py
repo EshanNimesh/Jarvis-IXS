@@ -9,7 +9,7 @@ import time
 from app.services.brain_client import BrainClient
 from app.services.executor import ActionExecutor
 from app.services.stt_service import STTService
-from app.services.tts_service import TTSService
+from app.services.tts_service import TTSService, initialize_pygame_mixer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,6 +60,7 @@ async def stream_response_to_tts(
     """Download, synthesize, and queue completed sentences concurrently."""
     stream_started = time.perf_counter()
     timing_origin = turn_started_at if turn_started_at is not None else stream_started
+    tts.begin_turn()
     audio_queue: asyncio.Queue[object] = asyncio.Queue()
     audio_end = object()
     barge_in = asyncio.Event()
@@ -96,33 +97,35 @@ async def stream_response_to_tts(
             item = await audio_queue.get()
             if item is audio_end:
                 break
-            task, sentence, sentence_number = item
+            pcm_queue, task, sentence, sentence_number = item
             if barge_in.is_set():
                 task.cancel()
                 continue
             try:
-                audio_data = await task
-                if barge_in.is_set():
-                    continue
-                await asyncio.to_thread(
-                    tts.play_prepared,
-                    audio_data,
-                    timing_started_at=timing_origin,
-                    sentence_number=sentence_number,
-                )
+                while True:
+                    pcm_chunk = await pcm_queue.get()
+                    if pcm_chunk is None:
+                        break
+                    if not barge_in.is_set():
+                        tts.queue_pcm_chunk(
+                            pcm_chunk,
+                            timing_started_at=timing_origin,
+                            sentence_number=sentence_number,
+                        )
+                await task
                 started = True
             except Exception:
                 logger.exception("Sentence pre-synthesis failed")
                 if barge_in.is_set():
                     continue
-                await asyncio.to_thread(tts.wait_until_done)
-                await tts.speak(sentence)
+                await asyncio.to_thread(tts.stop)
+                await tts.speak_local(sentence)
                 started = False
+        if started and not barge_in.is_set():
+            await asyncio.to_thread(tts.wait_until_done)
         monitor_stop.set()
         if monitor_task is not None:
             await monitor_task
-        if started and not barge_in.is_set():
-            await asyncio.to_thread(tts.wait_until_done)
 
     playback_task = asyncio.create_task(play_audio_queue())
     buffer = ""
@@ -133,19 +136,26 @@ async def stream_response_to_tts(
         nonlocal sentence_count
         sentence_count += 1
         sentence_number = sentence_count
+        pcm_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         logger.info(
             "[TIMING] Sentence %d dispatched to TTS: +%.3fms",
             sentence_number,
             (time.perf_counter() - timing_origin) * 1000,
         )
-        audio_task = asyncio.create_task(
-            tts.synthesize(
-                sentence,
-                timing_started_at=timing_origin,
-                sentence_number=sentence_number,
-            )
-        )
-        audio_queue.put_nowait((audio_task, sentence, sentence_number))
+
+        async def stream_sentence_pcm() -> None:
+            try:
+                async for pcm_chunk in tts.synthesize_stream(
+                    sentence,
+                    timing_started_at=timing_origin,
+                    sentence_number=sentence_number,
+                ):
+                    await pcm_queue.put(pcm_chunk)
+            finally:
+                await pcm_queue.put(None)
+
+        synthesis_task = asyncio.create_task(stream_sentence_pcm())
+        audio_queue.put_nowait((pcm_queue, synthesis_task, sentence, sentence_number))
 
     try:
         async for chunk in brain.query_brain_stream(
@@ -187,6 +197,10 @@ async def stream_response_to_tts(
 
 
 async def run() -> None:
+    try:
+        initialize_pygame_mixer()
+    except Exception:
+        logger.exception("Could not pre-initialize pygame audio mixer")
     brain = BrainClient()
     executor = ActionExecutor()
     tts = TTSService()

@@ -45,7 +45,14 @@ class STTService:
         return False
 
     def __init__(self) -> None:
-        self.model = WhisperModel("small.en", device="cpu", compute_type="int8")
+        # cpu_threads is a WhisperModel setting in faster-whisper, not a
+        # transcribe() option.
+        self.model = WhisperModel(
+            "base.en",
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=4,
+        )
         self.last_turn_end_at: float | None = None
 
     def listen_and_transcribe(self, duration_seconds: int = 15) -> str:
@@ -122,11 +129,13 @@ class STTService:
             beam_size=1,
             best_of=1,
             temperature=0,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 600},
             condition_on_previous_text=False,
             no_speech_threshold=0.6,
-            initial_prompt="JARVIS AI voice assistant conversation.",
+            initial_prompt="JARVIS Sri Lankan English voice assistant technical conversation.",
         )
         transcription = " ".join(segment.text.strip() for segment in segments).strip()
         transcription_completed_at = time.perf_counter()

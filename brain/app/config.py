@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     meta_api_key: str = ""
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://api.together.xyz/v1"
-    LLM_MODEL: str = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
+    LLM_MODEL: str = "muse-spark-1.3"
 
     model_config = SettingsConfigDict(
         env_file=".env",
