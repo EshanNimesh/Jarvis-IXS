@@ -1,13 +1,17 @@
 """HTTP client for the JARVIS Brain API."""
 
 import json
+import logging
 import re
+import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_structured_response(value: Any) -> dict[str, Any]:
@@ -44,6 +48,7 @@ class BrainClient:
             return
         import websockets
 
+        connect_started = time.perf_counter()
         parsed = urlsplit(settings.brain_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         uri = urlunsplit((scheme, parsed.netloc, "/ws/chat", "", ""))
@@ -53,6 +58,10 @@ class BrainClient:
             ping_interval=20,
             ping_timeout=20,
             max_size=None,
+        )
+        logger.info(
+            "[LATENCY] brain_websocket_connect_ms=%.0f",
+            (time.perf_counter() - connect_started) * 1000,
         )
 
     async def close(self) -> None:
@@ -80,8 +89,11 @@ class BrainClient:
             action["payload"] = {}
         return speak_text, action
 
-    async def query_brain_stream(self, prompt: str):
+    async def query_brain_stream(
+        self, prompt: str, *, timing_started_at: float | None = None
+    ):
         """Send a prompt and yield decoded speak text from WebSocket token frames."""
+        timing_origin = timing_started_at or time.perf_counter()
         raw_response = ""
         speak_started = False
         speak_finished = False
@@ -91,6 +103,9 @@ class BrainClient:
         unicode_digits = ""
         await self.connect()
         await self._websocket.send(prompt)
+        stream_started = time.perf_counter()
+        first_server_token_seen = False
+        first_speak_text_seen = False
         async for message in self._websocket:
             token = message
             try:
@@ -108,6 +123,16 @@ class BrainClient:
 
             if not isinstance(token, str) or not token:
                 continue
+            if not first_server_token_seen:
+                first_server_token_seen = True
+                logger.info(
+                    "[LATENCY] brain_first_websocket_token_ms=%.0f",
+                    (time.perf_counter() - stream_started) * 1000,
+                )
+                logger.info(
+                    "[TIMING] 3. LLM First Token (TTFT) Received: +%.3fms",
+                    (time.perf_counter() - timing_origin) * 1000,
+                )
             raw_response += token
             if not speak_started:
                 match = re.search(r'(?<!\\)"speak"\s*:\s*"', raw_response)
@@ -151,5 +176,15 @@ class BrainClient:
                 else:
                     decoded.append(char)
             if decoded:
+                if not first_speak_text_seen:
+                    first_speak_text_seen = True
+                    logger.info(
+                        "[LATENCY] brain_first_speak_text_ms=%.0f",
+                        (time.perf_counter() - stream_started) * 1000,
+                    )
                 yield "".join(decoded)
         self.last_stream_result = _parse_structured_response(raw_response)
+        logger.info(
+            "[LATENCY] brain_stream_complete_ms=%.0f",
+            (time.perf_counter() - stream_started) * 1000,
+        )

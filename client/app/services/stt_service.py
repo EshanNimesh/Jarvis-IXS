@@ -46,11 +46,14 @@ class STTService:
 
     def __init__(self) -> None:
         self.model = WhisperModel("small.en", device="cpu", compute_type="int8")
+        self.last_turn_end_at: float | None = None
 
     def listen_and_transcribe(self, duration_seconds: int = 15) -> str:
         if duration_seconds <= 0:
             raise ValueError("duration_seconds must be greater than zero")
 
+        self.last_turn_end_at = None
+        capture_started = time.perf_counter()
         max_seconds = min(float(duration_seconds), 15.0)
         chunk_seconds = 0.1
         chunk_frames = int(chunk_seconds * self.sample_rate)
@@ -86,17 +89,33 @@ class STTService:
                 elif speech_started:
                     trailing_silence += 1
                     if trailing_silence >= silence_chunks_required:
+                        self.last_turn_end_at = time.perf_counter()
+                        logger.info("[TIMING] 1. Mic Silence / Turn End Detected: +0.000ms")
                         break
                     speech_chunks.append(chunk)
 
+        if speech_started and self.last_turn_end_at is None:
+            # The recording cap can end a turn before the silence window does.
+            self.last_turn_end_at = time.perf_counter()
+            logger.info("[TIMING] 1. Mic Silence / Turn End Detected: +0.000ms (recording cap)")
+
         if not speech_chunks:
+            logger.info(
+                "[LATENCY] stt_capture_ms=%.0f result=no_speech",
+                (time.perf_counter() - capture_started) * 1000,
+            )
             return ""
         if trailing_silence:
             speech_chunks = speech_chunks[:-trailing_silence]
         audio = np.concatenate(speech_chunks) if speech_chunks else np.array([], dtype=np.float32)
         if audio.size == 0:
+            logger.info(
+                "[LATENCY] stt_capture_ms=%.0f result=empty_audio",
+                (time.perf_counter() - capture_started) * 1000,
+            )
             return ""
 
+        transcription_started = time.perf_counter()
         segments, _info = self.model.transcribe(
             audio,
             language="en",
@@ -104,9 +123,22 @@ class STTService:
             best_of=1,
             temperature=0,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
+            vad_parameters={"min_silence_duration_ms": 600},
             condition_on_previous_text=False,
             no_speech_threshold=0.6,
             initial_prompt="JARVIS AI voice assistant conversation.",
         )
-        return " ".join(segment.text.strip() for segment in segments).strip()
+        transcription = " ".join(segment.text.strip() for segment in segments).strip()
+        transcription_completed_at = time.perf_counter()
+        if self.last_turn_end_at is not None:
+            logger.info(
+                "[TIMING] 2. STT Transcription Complete: +%.3fms",
+                (transcription_completed_at - self.last_turn_end_at) * 1000,
+            )
+        logger.info(
+            "[LATENCY] stt_capture_ms=%.0f stt_transcribe_ms=%.0f audio_seconds=%.2f",
+            (transcription_started - capture_started) * 1000,
+            (time.perf_counter() - transcription_started) * 1000,
+            audio.size / self.sample_rate,
+        )
+        return transcription

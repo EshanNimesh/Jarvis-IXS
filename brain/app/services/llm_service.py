@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -12,7 +13,9 @@ import requests
 from app.config import settings
 
 DEFAULT_SYSTEM_PROMPT = """
-You are JARVIS, an advanced, autonomous AI developer assistant.
+You are JARVIS, a fast, ultra-concise voice assistant and developer assistant.
+Respond in 1 to 2 short spoken sentences maximum unless explicitly asked for detail.
+Never use markdown, lists, or URLs.
 Your output MUST be valid JSON with keys in this order: {"speak": "...", "thought": "...", "action": "none", "payload": {}}.
 
 CRITICAL FOR VOICE LATENCY:
@@ -139,6 +142,10 @@ class LLMService:
         if not settings.LLM_API_KEY:
             raise RuntimeError("LLM API key is not configured.")
 
+        stream_started = time.perf_counter()
+        first_token_seen = False
+        token_count = 0
+
         url = f"{settings.LLM_BASE_URL.rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"}
         payload = {
@@ -151,22 +158,41 @@ class LLMService:
             "temperature": 0,
         }
         client = await self._get_async_client()
-        async with client.stream("POST", url, json=payload, headers=headers) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    event = json.loads(data)
-                    token = event["choices"][0]["delta"].get("content")
-                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-                    logger.debug("Skipping malformed LLM token event")
-                    continue
-                if isinstance(token, str) and token:
-                    yield token
+        try:
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data)
+                        token = event["choices"][0]["delta"].get("content")
+                    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                        logger.debug("Skipping malformed LLM token event")
+                        continue
+                    if isinstance(token, str) and token:
+                        token_count += 1
+                        if not first_token_seen:
+                            first_token_seen = True
+                            first_token_ms = (time.perf_counter() - stream_started) * 1000
+                            logger.info(
+                                "[LATENCY] llm_first_token_ms=%.0f",
+                                first_token_ms,
+                            )
+                            logger.info(
+                                "[TIMING] Backend upstream LLM first token: +%.3fms from request",
+                                first_token_ms,
+                            )
+                        yield token
+        finally:
+            logger.info(
+                "[LATENCY] llm_stream_finished_ms=%.0f token_count=%d",
+                (time.perf_counter() - stream_started) * 1000,
+                token_count,
+            )
 
 
 llm_service = LLMService()

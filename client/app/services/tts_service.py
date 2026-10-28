@@ -7,6 +7,7 @@ from io import BytesIO
 import logging
 import threading
 import time
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -31,22 +32,54 @@ class TTSService:
             logger.exception("Could not initialize pygame audio mixer")
         atexit.register(self.close)
 
-    async def synthesize(self, text: str) -> bytes:
+    async def synthesize(
+        self,
+        text: str,
+        *,
+        timing_started_at: float | None = None,
+        sentence_number: int | None = None,
+    ) -> bytes:
         """Fetch sentence audio bytes without waiting for current playback."""
-        if not self._mixer_ready:
-            raise RuntimeError("pygame audio mixer is unavailable")
-        import edge_tts
+        synthesis_started = time.perf_counter()
+        first_audio_byte_logged = False
+        try:
+            if not self._mixer_ready:
+                raise RuntimeError("pygame audio mixer is unavailable")
+            import edge_tts
 
-        voice = settings.tts_voice or "en-US-GuyNeural"
-        audio = bytearray()
-        async for chunk in edge_tts.Communicate(text, voice=voice).stream():
-            if chunk.get("type") == "audio":
-                audio.extend(chunk["data"])
-        if not audio:
-            raise RuntimeError("Edge TTS returned an empty audio response")
-        return bytes(audio)
+            voice = settings.tts_voice or "en-US-GuyNeural"
+            audio = bytearray()
+            async for chunk in edge_tts.Communicate(text, voice=voice).stream():
+                if chunk.get("type") == "audio":
+                    audio_chunk = chunk.get("data", b"")
+                    if audio_chunk:
+                        audio.extend(audio_chunk)
+                        if (
+                            sentence_number == 1
+                            and timing_started_at is not None
+                            and not first_audio_byte_logged
+                        ):
+                            first_audio_byte_logged = True
+                            logger.info(
+                                "[TIMING] 4. TTS Sentence 1 First Audio Byte Ready: +%.3fms",
+                                (time.perf_counter() - timing_started_at) * 1000,
+                            )
+            if not audio:
+                raise RuntimeError("Edge TTS returned an empty audio response")
+            return bytes(audio)
+        finally:
+            logger.info(
+                "[LATENCY] edge_tts_synthesis_ms=%.0f",
+                (time.perf_counter() - synthesis_started) * 1000,
+            )
 
-    def play_prepared(self, audio_data: bytes) -> None:
+    def play_prepared(
+        self,
+        audio_data: bytes,
+        *,
+        timing_started_at: float | None = None,
+        sentence_number: int | None = None,
+    ) -> None:
         """Play an in-memory MP3 after the current sentence finishes."""
         import pygame
 
@@ -65,6 +98,11 @@ class TTSService:
                 pygame.mixer.music.load(audio_file, "mp3")
                 self._current_audio_file = audio_file
                 pygame.mixer.music.play()
+                if sentence_number == 1 and timing_started_at is not None:
+                    logger.info(
+                        "[TIMING] 5. Pygame Audio Playback Started: +%.3fms (TOTAL TIME)",
+                        (time.perf_counter() - timing_started_at) * 1000,
+                    )
 
     def is_playing(self) -> bool:
         """Return whether JARVIS audio is currently playing through pygame."""
@@ -91,8 +129,13 @@ class TTSService:
             await asyncio.to_thread(self.wait_until_done)
         except Exception:
             logger.exception("Edge TTS failed; falling back to local pyttsx3")
+            fallback_started = time.perf_counter()
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(self._executor, self._speak_sync, text)
+            logger.info(
+                "[LATENCY] pyttsx3_fallback_ms=%.0f",
+                (time.perf_counter() - fallback_started) * 1000,
+            )
 
     def _speak_sync(self, text: str) -> None:
         com_initialized = False
